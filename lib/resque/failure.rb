@@ -53,14 +53,44 @@ module Resque
     def self.url
       backend.url
     end
-    
+
     # Clear all failure jobs
     def self.clear
       backend.clear
     end
-    
+
     def self.requeue(index)
       backend.requeue(index)
+    end
+
+    def self.remove(index)
+      backend.remove(index)
+    end
+    
+    # Requeues all failed jobs in a specific queue.
+    # Queue name should be a string.
+    def self.requeue_queue(queue)
+      i=0
+      while job = Resque::Failure.all(i)
+        if job['queue'] == queue
+          Resque::Failure.requeue(i)
+        end  
+        i+=1
+      end
+    end
+
+    # Removes all failed jobs in a specific queue.
+    # Queue name should be a string.
+    def self.remove_queue(queue)
+      i=0
+      while job = Resque::Failure.all(i)
+        if job['queue'] == queue
+          # This will remove the failure from the array so do not increment the index.
+          Resque::Failure.remove(i)
+        else
+          i+=1    
+        end
+      end
     end
   end
 end

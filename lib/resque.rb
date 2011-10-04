@@ -23,6 +23,18 @@ module Resque
   include Helpers
   extend self
 
+  def driver
+    mongo
+  end
+
+  def driver= server
+    self.mongo = server
+  end
+
+  def driver_id
+    @con.host
+  end
+
   # Accepts a 'hostname:port' string or a Redis server.
   def mongo=(server)
     case server
@@ -114,7 +126,19 @@ module Resque
   end
 
   def to_s
-    "Mongo Client connected to #{@con.host}"
+    "Mongo Client connected to #{driver_id}"
+  end
+
+  # If 'inline' is true Resque will call #perform method inline
+  # without queuing it into Redis and without any Resque callbacks.
+  # The 'inline' is false Resque jobs will be put in queue regularly.
+  def inline?
+    @inline
+  end
+  alias_method :inline, :inline?
+
+  def inline=(inline)
+    @inline = inline
   end
 
   def add_indexes
@@ -137,19 +161,32 @@ module Resque
 
   # Pushes a job onto a queue. Queue name should be a string and the
   # item should be any JSON-able Ruby object.
-  def push(queue, item)
+  #
+  # Resque works generally expect the `item` to be a hash with the following
+  # keys:
+  #
+  #   class - The String name of the job to run.
+  #    args - An Array of arguments to pass the job. Usually passed
+  #           via `class.to_class.perform(*args)`.
+  #
+  # Example
+  #
+  #   Resque.push('archive', :class => 'Archive', :args => [ 35, 'tar' ])
+  #
+  # Returns nothing
+  def push queue, item
     watch_queue(queue)
-    mongo << { :queue => queue.to_s, :item => encode(item) }
+    mongo.insert(:queue => queue.to_s, :item => encode(item))
   end
 
   # Pops a job off a queue. Queue name should be a string.
   #
   # Returns a Ruby object.
-  def pop(queue)
-    doc = mongo.find_and_modify( :query => { :queue => queue },
-                                 :sort => [:natural, :desc],
-                                 :remove => true )
-    decode doc['item']
+  def pop queue
+    doc = mongo.find_and_modify :query  => { :queue => queue },
+                                :sort   => [:natural, :desc],
+                                :remove => true
+    decode(doc['item']) unless doc.nil?
   rescue Mongo::OperationFailure => e
     return nil if e.message =~ /No matching object/
     raise e
@@ -157,7 +194,7 @@ module Resque
 
   # Returns an integer representing the size of a queue.
   # Queue name should be a string.
-  def size(queue)
+  def size queue
     mongo.find(:queue => queue).count
   end
 
@@ -216,9 +253,37 @@ module Resque
   #
   # If no queue can be inferred this method will raise a `Resque::NoQueueError`
   #
+  # Returns true if the job was queued, nil if the job was rejected by a
+  # before_enqueue hook.
+  #
   # This method is considered part of the `stable` API.
   def enqueue(klass, *args)
-    Job.create(queue_from_class(klass), klass, *args)
+    enqueue_to(queue_from_class(klass), klass, *args)
+  end
+
+  # Just like `enqueue` but allows you to specify the queue you want to
+  # use. Runs hooks.
+  #
+  # `queue` should be the String name of the queue you're targeting.
+  #
+  # Returns true if the job was queued, nil if the job was rejected by a
+  # before_enqueue hook.
+  #
+  # This method is considered part of the `stable` API.
+  def enqueue_to(queue, klass, *args)
+    # Perform before_enqueue hooks. Don't perform enqueue if any hook returns false
+    before_hooks = Plugin.before_enqueue_hooks(klass).collect do |hook|
+      klass.send(hook, *args)
+    end
+    return nil if before_hooks.any? { |result| result == false }
+
+    Job.create(queue, klass, *args)
+
+    Plugin.after_enqueue_hooks(klass).each do |hook|
+      klass.send(hook, *args)
+    end
+
+    return true
   end
 
   # This method can be used to conveniently remove a job from a queue.
@@ -249,7 +314,17 @@ module Resque
   #
   # This method is considered part of the `stable` API.
   def dequeue(klass, *args)
+    # Perform before_dequeue hooks. Don't perform dequeue if any hook returns false
+    before_hooks = Plugin.before_dequeue_hooks(klass).collect do |hook|
+      klass.send(hook, *args)
+    end
+    return if before_hooks.any? { |result| result == false }
+
     Job.destroy(queue_from_class(klass), klass, *args)
+
+    Plugin.after_dequeue_hooks(klass).each do |hook|
+      klass.send(hook, *args)
+    end
   end
 
   # Given a class, try to extrapolate an appropriate queue based on a
@@ -266,6 +341,23 @@ module Resque
   # This method is considered part of the `stable` API.
   def reserve(queue)
     Job.reserve(queue)
+  end
+
+  # Validates if the given klass could be a valid Resque job
+  #
+  # If no queue can be inferred this method will raise a `Resque::NoQueueError`
+  #
+  # If given klass is nil this method will raise a `Resque::NoClassError`
+  def validate(klass, queue = nil)
+    queue ||= queue_from_class(klass)
+
+    if !queue
+      raise NoQueueError.new("Jobs must be placed onto a queue.")
+    end
+
+    if klass.to_s.empty?
+      raise NoClassError.new("Jobs must be given a class.")
+    end
   end
 
 

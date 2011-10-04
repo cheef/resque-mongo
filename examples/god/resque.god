@@ -4,6 +4,7 @@ num_workers = rails_env == 'production' ? 5 : 2
 
 num_workers.times do |num|
   God.watch do |w|
+    w.dir      = "#{rails_root}"
     w.name     = "resque-#{num}"
     w.group    = 'resque'
     w.interval = 30.seconds
@@ -13,7 +14,7 @@ num_workers.times do |num|
     w.uid = 'git'
     w.gid = 'git'
 
-    # retart if memory gets too high
+    # restart if memory gets too high
     w.transition(:up, :restart) do |on|
       on.condition(:memory_usage) do |c|
         c.above = 350.megabytes

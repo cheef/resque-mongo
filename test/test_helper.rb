@@ -1,21 +1,22 @@
+require 'rubygems'
+require 'bundler'
+Bundler.setup(:default, :test)
+Bundler.require(:default, :test)
+
 dir = File.dirname(File.expand_path(__FILE__))
 $LOAD_PATH.unshift dir + '/../lib'
 $TESTING = true
 require 'test/unit'
-require 'rubygems'
-require 'resque'
+
+begin
+  require 'leftright'
+rescue LoadError
+end
 
 
 #
 # make sure we can run redis
 #
-
-# if !system("which redis-server")
-#   puts '', "** can't find `redis-server` in your path"
-#   puts "** try running `sudo rake install`"
-#   abort ''
-# end
-
 
 #
 # start our own redis when the tests start,
@@ -32,6 +33,7 @@ at_exit do
   end
 end
 
+require 'resque'
 Resque.mongo = 'localhost:27017'
 
 ##
@@ -52,6 +54,8 @@ def context(*args, &block)
   end
   (class << klass; self end).send(:define_method, :name) { name.gsub(/\W/,'_') }
   klass.class_eval &block
+  # XXX: In 1.8.x, not all tests will run unless anonymous classes are kept in scope.
+  ($test_classes ||= []) << klass
 end
 
 ##
@@ -98,5 +102,32 @@ end
 class BadJobWithSyntaxError
   def self.perform
     raise SyntaxError, "Extra Bad job!"
+  end
+end
+
+class BadFailureBackend < Resque::Failure::Base
+  def save
+    raise Exception.new("Failure backend error")
+  end
+end
+
+def with_failure_backend(failure_backend, &block)
+  previous_backend = Resque::Failure.backend
+  Resque::Failure.backend = failure_backend
+  yield block
+ensure
+  Resque::Failure.backend = previous_backend
+end
+
+class Time
+  # Thanks, Timecop
+  class << self
+    alias_method :now_without_mock_time, :now
+
+    def now_with_mock_time
+      $fake_time || now_without_mock_time
+    end
+
+    alias_method :now, :now_with_mock_time
   end
 end

@@ -1,4 +1,8 @@
-load 'tasks/redis.rake'
+#
+# Setup
+#
+
+load 'lib/tasks/redis.rake'
 
 $LOAD_PATH.unshift 'lib'
 require 'resque/tasks'
@@ -12,21 +16,30 @@ end
 # Tests
 #
 
+require 'rake/testtask'
+
 task :default => :test
 
-desc "Run tests"
-task :test do
-  # Don't use the rake/testtask because it loads a new
-  # Ruby interpreter - we want to run tests with the current
-  # `rake` so our library manager still works
-  Dir['test/*_test.rb'].each do |f|
-    require f
+if command?(:rg)
+  desc "Run the test suite with rg"
+  task :test do
+    Dir['test/**/*_test.rb'].each do |f|
+      sh("rg #{f}")
+    end
+  end
+else
+  Rake::TestTask.new do |test|
+    test.libs << "test"
+    test.test_files = FileList['test/**/*_test.rb']
   end
 end
 
-desc "Activate kicker - gem install kicker"
-task :kick do
-  exec "kicker -e rake lib test"
+if command? :kicker
+  desc "Launch Kicker (like autotest)"
+  task :kicker do
+    puts "Kicking... (ctrl+c to cancel)"
+    exec "kicker -e rake test lib examples"
+  end
 end
 
 
@@ -45,6 +58,11 @@ begin
   require 'sdoc_helpers'
 rescue LoadError
 end
+
+
+#
+# Publishing
+#
 
 desc "Push a new version to Gemcutter"
 task :publish do

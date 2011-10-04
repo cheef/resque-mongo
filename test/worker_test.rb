@@ -25,18 +25,43 @@ context "Resque::Worker" do
     assert_equal('Extra Bad job!', Resque::Failure.all['error'])
   end
 
+  test "does not allow exceptions from failure backend to escape" do
+    job = Resque::Job.new(:jobs, {})
+    with_failure_backend BadFailureBackend do
+      @worker.perform job
+    end
+  end
+
   test "fails uncompleted jobs on exit" do
-    job = Resque::Job.new(:jobs, [GoodJob, "blah"])
+    job = Resque::Job.new(:jobs, {'class' => 'GoodJob', 'args' => "blah"})
     @worker.working_on(job)
     @worker.unregister_worker
     assert_equal 1, Resque::Failure.count
   end
 
+  class ::SimpleJobWithFailureHandling
+    def self.on_failure_record_failure(exception)
+      @@exception = exception
+    end
+    
+    def self.exception
+      @@exception
+    end
+  end
+
+  test "fails uncompleted jobs on exit, and calls failure hook" do
+    job = Resque::Job.new(:jobs, {'class' => 'SimpleJobWithFailureHandling', 'args' => ""})
+    @worker.working_on(job)
+    @worker.unregister_worker
+    assert_equal 1, Resque::Failure.count
+    assert(SimpleJobWithFailureHandling.exception.kind_of?(Resque::DirtyExit))
+  end
+
   test "can peek at failed jobs" do
     10.times { Resque::Job.create(:jobs, BadJob) }
     @worker.work(0)
-
     assert_equal 10, Resque::Failure.count
+
     assert_equal 10, Resque::Failure.all(0, 20).size
   end
 
@@ -55,6 +80,12 @@ context "Resque::Worker" do
     @worker.process
     @worker.process
     assert_equal 2, Resque::Failure.count
+  end
+
+  test "strips whitespace from queue names" do
+    queues = "critical, high, low".split(',')
+    worker = Resque::Worker.new(*queues)
+    assert_equal %w( critical high low ), worker.queues
   end
 
   test "can work on multiple queues" do
@@ -254,6 +285,11 @@ context "Resque::Worker" do
     end
   end
 
+  test "worker_pids returns pids" do
+    known_workers = @worker.worker_pids
+    assert !known_workers.empty?
+  end
+
   test "Processed jobs count" do
     @worker.work(0)
     assert_equal 1, Resque.info[:processed]
@@ -288,6 +324,19 @@ context "Resque::Worker" do
     assert $BEFORE_FORK_CALLED
   end
 
+  test "very verbose works in the afternoon" do
+    require 'time'
+    $last_puts = ""
+    $fake_time = Time.parse("15:44:33 2011-03-02")
+    singleton = class << @worker; self end
+    singleton.send :define_method, :puts, lambda { |thing| $last_puts = thing }
+
+    @worker.very_verbose = true
+    @worker.log("some log text")
+
+    assert_match /\*\* \[15:44:33 2011-03-02\] \d+: some log text/, $last_puts
+  end
+
   test "Will call an after_fork hook after forking" do
     Resque.drop
     $AFTER_FORK_CALLED = false
@@ -298,5 +347,29 @@ context "Resque::Worker" do
     Resque::Job.create(:jobs, SomeJob, 20, '/tmp')
     workerA.work(0)
     assert $AFTER_FORK_CALLED
+  end
+
+  test "returns PID of running process" do
+    assert_equal @worker.to_s.split(":")[1].to_i, @worker.pid
+  end
+  
+  test "requeue failed queue" do
+    queue = 'good_job'
+    Resque::Failure.create(:exception => Exception.new, :worker => Resque::Worker.new(queue), :queue => queue, :payload => {'class' => 'GoodJob'})
+    Resque::Failure.create(:exception => Exception.new, :worker => Resque::Worker.new(queue), :queue => 'some_job', :payload => {'class' => 'SomeJob'})
+    Resque::Failure.requeue_queue(queue)
+    assert Resque::Failure.all(0).has_key?('retried_at')
+    assert !Resque::Failure.all(1).has_key?('retried_at')
+  end
+
+  test "remove failed queue" do
+    queue = 'good_job'
+    queue2 = 'some_job'
+    Resque::Failure.create(:exception => Exception.new, :worker => Resque::Worker.new(queue), :queue => queue, :payload => {'class' => 'GoodJob'})
+    Resque::Failure.create(:exception => Exception.new, :worker => Resque::Worker.new(queue2), :queue => queue2, :payload => {'class' => 'SomeJob'})
+    Resque::Failure.create(:exception => Exception.new, :worker => Resque::Worker.new(queue), :queue => queue, :payload => {'class' => 'GoodJob'})
+    Resque::Failure.remove_queue(queue)
+    assert_equal queue2, Resque::Failure.all(0)['queue']
+    assert_equal 1, Resque::Failure.count
   end
 end
